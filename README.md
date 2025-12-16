@@ -1,7 +1,7 @@
 # Speech-Emotion-Analysis-with-Signal-Processing
 Analisis emosi dari sinyal suara menggunakan teknik pengolahan sinyal dan klasifikasi rule-based berdasarkan fitur akustik.
 
- ## 📚Dataset
+ ## Dataset
 Project ini menggunakan dua sumber data:
 
 ### 1. RAVDESS Dataset
@@ -9,8 +9,7 @@ RAVDESS (Ryerson Audio-Visual Database of Emotional Speech and Song) digunakan s
 - menganalisis pola statistik fitur akustik berdasarkan emosi,
 - membangun aturan (rule-based) klasifikasi emosi.
 
-Link dataset:
-(https://www.kaggle.com/datasets/uwrfkaggler/ravdess-emotional-speech-audio)
+Link dataset:(https://zenodo.org/record/1188976)
 
 ### 2. Rekaman Suara Pribadi
 Selain dataset RAVDESS, project ini juga menggunakan **rekaman suara pribadi** sebagai:
