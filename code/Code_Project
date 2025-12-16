@@ -1,0 +1,598 @@
+!pip install gdown
+
+!pip install gdown librosa noisereduce soundfile
+
+import gdown
+import os
+import zipfile
+import os
+import shutil
+import librosa, librosa.display
+import numpy as np
+import matplotlib.pyplot as plt
+import noisereduce as nr
+import scipy.signal as signal
+import soundfile as sf
+import pandas as pd
+from IPython.display import Audio, display
+import soundfile as sf
+
+# LINK FILE ZIP (bukan folder)
+url = "https://drive.google.com/uc?id=1GUC7EPXl2BuUqmyw67eY259PVoIw_CaG"
+
+output = "ravdess_selected.zip"
+
+gdown.download(url, output, quiet=False)
+
+with zipfile.ZipFile(output, 'r') as zip_ref:
+    zip_ref.extractall(".")
+print(os.listdir("ravdess_selected"))
+print("Isi folder:", os.listdir("ravdess_selected"))
+
+# Folder utama hasil ekstraksi zip
+BASE = "ravdess_selected"
+# Kadang zip berisi folder dobel: ravdess_selected/ravdess_selected
+NESTED = os.path.join(BASE, "ravdess_selected")
+
+# Jika folder double rapikan struktur
+if os.path.exists(NESTED):
+    for item in os.listdir(NESTED):
+        src = os.path.join(NESTED, item)
+        dst = os.path.join(BASE, item)
+
+        # kalau sudah ada, skip supaya tidak overwrite
+        if not os.path.exists(dst):
+            shutil.move(src, dst)
+
+    # hapus folder double
+    shutil.rmtree(NESTED)
+
+print("Struktur akhir:", os.listdir(BASE))
+
+SOURCE = "ravdess_selected"
+
+# Cek jumlah file audio per aktor
+for actor in ["Actor_01", "Actor_02"]:
+    folder = os.path.join(SOURCE, actor)
+    print(actor, "->", len(os.listdir(folder)), "file")
+
+def parse_emotion(filename):
+    return {
+        "01": "neutral",
+        "02": "calm",
+        "03": "happy",
+        "04": "sad",
+        "05": "angry",
+        "06": "fearful",
+        "07": "disgust",
+        "08": "surprised"
+    }[filename.split("-")[2]]
+
+audio_files = []
+
+for actor in ["Actor_01", "Actor_02"]:
+    folder = os.path.join(SOURCE, actor)
+    for file in sorted(os.listdir(folder)):
+        if file.endswith(".wav"):
+            emotion = parse_emotion(file)
+            audio_files.append({
+                "actor": actor,                     # Aktor pembicara
+                "file": file,                       # Nama file
+                "emotion": emotion,                 # Label emosi
+                "path": os.path.join(folder, file)  # Path lengkap
+            })
+
+# Cek hasil parsing
+for item in audio_files:
+    print(item["actor"], "|", item["emotion"], "|", item["file"])
+
+# Preprocessing
+
+# BANDPASS FILTERING
+def bandpass_filter(y, sr, low=50, high=4000, order=5): # Menghilangkan noise frekuensi rendah & tinggi fokus ke frekuensi suara manusia
+    nyq = sr / 2
+    b, a = signal.butter(order, [low/nyq, high/nyq], btype='band')
+    return signal.filtfilt(b, a, y)
+
+# DENOISING (SPECTRAL GATING)
+def denoise_audio(y, sr): # Mengurangi noise menggunakan noisereduce
+    return nr.reduce_noise(y=y, sr=sr)
+
+
+# Visualisasi amplitudo audio terhadap waktu
+def plot_waveform(y, sr, title):
+    plt.figure(figsize=(12, 3))
+    librosa.display.waveshow(y, sr=sr)
+    plt.title(title)
+    plt.xlabel("Time (s)")
+    plt.ylabel("Amplitude")
+    plt.grid()
+    plt.show()
+
+# Visualisasi energi frekuensi terhadap waktu
+def plot_spectrogram(y, sr, title):
+    S = librosa.stft(y)
+    S_db = librosa.amplitude_to_db(np.abs(S), ref=np.max)
+    plt.figure(figsize=(12, 4))
+    librosa.display.specshow(S_db, sr=sr, x_axis='time', y_axis='hz')
+    plt.colorbar()
+    plt.title(title)
+    plt.show()
+
+# FFT
+
+# FFT
+# Mengubah sinyal waktu ke domain frekuensi
+def compute_fft(y, sr):
+    N = len(y)
+    Y = np.abs(np.fft.rfft(y))
+    f = np.fft.rfftfreq(N, 1/sr)
+    return f, Y
+
+# Plot spektrum frekuensi
+def plot_fft(f, Y, title="FFT"):
+    plt.figure(figsize=(12,3))
+    plt.plot(f, Y)
+    plt.xlim(0, 4000)
+    plt.title(title)
+    plt.xlabel("Hz")
+    plt.show()
+
+# Ekstrasi fitur
+
+# Pitch (fundamental frequency) menggunakan YIN menggambarkan tinggi-rendah suara
+def extract_pitch(y, sr):
+    f0 = librosa.yin(y, fmin=50, fmax=800, sr=sr)
+    return float(np.mean(f0))
+
+# Zero Crossing Rate menggambarkan tingkat noise / kekasaran suara
+def extract_zcr(y):
+    return float(np.mean(librosa.feature.zero_crossing_rate(y)))
+
+# RMS Energy menggambarkan energi / kekuatan suara
+def extract_rms(y):
+    return float(np.mean(librosa.feature.rms(y=y)))
+
+# MFCC (13 koefisien) menggambarkan karakteristik spektral suara
+def extract_mfcc(y, sr):
+    mf = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    return np.mean(mf, axis=1)
+
+# versi gabungan (dipakai untuk audio user & dataset)
+def extract_features(y, sr):
+    pitch = extract_pitch(y, sr)
+    zcr = extract_zcr(y)
+    rms = extract_rms(y)
+    mfcc = extract_mfcc(y, sr)
+    return pitch, zcr, rms, mfcc
+
+#Hasil audio & visualisasi
+
+# lokasi penyimpanan audio hasil preprocessing
+processed_dir = "/content/ravdess_selected"
+os.makedirs(processed_dir, exist_ok=True)
+# Menampung hasil fitur & prediksi emosi
+feature_rows = []
+
+# Menyimpan seluruh fitur audio dataset
+for item in audio_files:
+
+    # Load semua audio dataset
+    # Menampilkan nama file agar jelas proses sedang berjalan di rekaman mana
+    print("\n" + "="*70)
+    print("ACTOR  :", item["actor"])
+    print("EMOSI  :", item["emotion"])
+    print("FILE   :", item["file"])
+    print("="*70)
+
+    # LOAD AUDIO
+    # Audio dimuat dengan sampling rate tetap (16 kHz)
+    y_raw, sr = librosa.load(item["path"], sr=16000)
+
+    # PREPROCESSING
+    y_bp = bandpass_filter(y_raw, sr)
+    y_clean = denoise_audio(y_bp, sr)
+
+    # SAVE CLEAN AUDIO
+    save_path = os.path.join(processed_dir, item["file"])
+    sf.write(save_path, y_clean, sr)
+
+    # AUDIO OUTPUT
+    print("\nAUDIO BEFORE")
+    display(Audio(y_raw, rate=sr))
+
+    print("\nAUDIO AFTER")
+    display(Audio(y_clean, rate=sr))
+
+    # WAVEFORM
+    plot_waveform(y_raw, sr, "Waveform BEFORE Preprocessing")
+    plot_waveform(y_clean, sr, "Waveform AFTER Preprocessing")
+
+    # SPECTROGRAM
+    plot_spectrogram(y_raw, sr, "Spectrogram BEFORE Preprocessing")
+    plot_spectrogram(y_clean, sr, "Spectrogram AFTER Preprocessing")
+
+    # FFT
+    f_raw, Y_raw = compute_fft(y_raw, sr)
+    plot_fft(f_raw, Y_raw, "FFT BEFORE Preprocessing")
+
+    f_clean, Y_clean = compute_fft(y_clean, sr)
+    plot_fft(f_clean, Y_clean, "FFT AFTER Preprocessing")
+
+    # FEATURE EXTRACTION
+    pitch = extract_pitch(y_clean, sr)
+    zcr   = extract_zcr(y_clean)
+    rms   = extract_rms(y_clean)
+    mfcc  = extract_mfcc(y_clean, sr)
+
+    print("\nFITUR AUDIO")
+    print("Pitch :", pitch)
+    print("ZCR   :", zcr)
+    print("RMS   :", rms)
+    print("MFCC  :", mfcc.tolist())
+
+    feature_rows.append({
+        "actor": item["actor"],
+        "file": item["file"],
+        "emotion": item["emotion"],
+        "pitch": pitch,
+        "zcr": zcr,
+        "rms": rms,
+        "mfcc": mfcc.tolist()
+    })
+
+# Statistik deskriptif per emosi
+df = pd.DataFrame(feature_rows)
+stats = df.groupby("emotion")[["pitch","zcr","rms"]].agg(['mean','min','max','std'])
+print("\nStatistik 8 Emosi Berdasarkan Dataset")
+print(stats)
+
+# Prediksi Emosi
+
+# Pitch → tinggi nada (indikator emosi)
+# ZCR → tingkat kekasaran/noise
+# RMS → energi/intensitas suara
+# MFCC → tekstur & warna suara
+
+def predict_emotion_rule(pitch, zcr, rms, mfcc):
+    mf1 = mfcc[1]     # "brightness" / spectral slope
+    energy = rms
+    noise = zcr
+
+    # FEARFUL (pitch tinggi + noise tinggi + zcr tinggi + energi sedang )
+    if pitch > 260 and noise > 0.09 and energy < 0.015:
+        return "fearful"
+
+    # SAD (pitch rendah + energi rendah + mfcc dark)
+    if pitch < 220 and energy < 0.01 and mf1 < -5:
+        return "sad"
+
+    # HAPPY (harus benar-benar cerah & energi tinggi)
+    if mf1 > 60 and energy > 0.02 and pitch > 250:
+        return "happy"
+
+    # ANGRY (energi sangat besar + noise besar)
+    if noise > 0.13 and energy > 0.03:
+        return "angry"
+
+    # DISGUST (noise besar + mfcc dark)
+    if noise > 0.10 and mf1 < 5 and energy < 0.015:
+        return "disgust"
+
+    # SURPRISED (pitch sangat tinggi + energi sedang)
+    if pitch > 280 and energy > 0.015 and mf1 > 5:
+        return "surprised"
+
+    # CALM (energi rendah, pitch stabil, noise rendah)
+    if energy < 0.003 and noise < 0.07:
+        return "calm"
+
+    return "neutral"
+
+# Use Recording Prediction
+
+file_id = "1ixkyrWThpBalrfAGf3br1PXaAfVoNR8Z"
+url = f"https://drive.google.com/uc?id={file_id}"
+
+output = "recording.zip"
+
+gdown.download(url, output, quiet=False)
+
+# Ekstrak file zip rekaman user
+with zipfile.ZipFile("recording.zip", "r") as zip_ref:
+    zip_ref.extractall("rekaman_sendiri/recording")
+
+print("Isi folder:", os.listdir("rekaman_sendiri/recording"))
+
+# Cek isi folder hasil ekstraksi
+for f in os.listdir("rekaman_sendiri/recording"):
+    print(f)
+
+# Tampilkan semua file di folder
+recordings = []
+
+for file in sorted(os.listdir("rekaman_sendiri/recording")):
+    if file.endswith(".wav"):
+        recordings.append({
+            "file": file,
+            "path": os.path.join("rekaman_sendiri/recording", file) # path lengkap
+        })
+
+# Jumlah rekaman yang terbaca
+print("Jumlah file:", len(recordings))
+# Tampilkan nama file rekaman
+for r in recordings:
+    print(r["file"])
+
+# Loop setiap rekaman user
+recording_files = [r["path"] for r in recordings]
+
+for path in recording_files:
+
+    print("\n" + "="*60)
+    print("REKAMAN USER :", os.path.basename(path))
+    print("="*60)
+
+    # LOAD AUDIO
+    y_raw, sr = librosa.load(path, sr=16000)
+
+    # PREPROCESSING
+    y_bp = bandpass_filter(y_raw, sr)
+    y_clean = denoise_audio(y_bp, sr)
+
+    # SAVE CLEAN AUDIO
+    save_path = os.path.join(processed_dir, item["file"])
+    sf.write(save_path, y_clean, sr)
+
+    # AUDIO OUTPUT
+    print("\nAUDIO BEFORE")
+    display(Audio(y_raw, rate=sr))
+
+    print("\nAUDIO AFTER")
+    display(Audio(y_clean, rate=sr))
+
+    # WAVEFORM
+    plot_waveform(y_raw, sr, "Waveform BEFORE Preprocessing")
+    plot_waveform(y_clean, sr, "Waveform AFTER Preprocessing")
+
+    # SPECTROGRAM
+    plot_spectrogram(y_raw, sr, "Spectrogram BEFORE Preprocessing")
+    plot_spectrogram(y_clean, sr, "Spectrogram AFTER Preprocessing")
+
+    # FFT
+    f_raw, Y_raw = compute_fft(y_raw, sr)
+    plot_fft(f_raw, Y_raw, "FFT BEFORE Preprocessing")
+
+    f_clean, Y_clean = compute_fft(y_clean, sr)
+    plot_fft(f_clean, Y_clean, "FFT AFTER Preprocessing")
+
+    # FEATURE EXTRACTION
+    pitch = extract_pitch(y_clean, sr)
+    zcr   = extract_zcr(y_clean)
+    rms   = extract_rms(y_clean)
+    mfcc  = extract_mfcc(y_clean, sr)
+
+    # EMOTION PREDICTION
+    pred_emotion = predict_emotion_rule(pitch, zcr, rms, mfcc)
+
+    # OUTPUT FITUR AUDIO
+    print("\nFITUR AUDIO (REKAMAN USER)")
+    print("Pitch :", pitch)
+    print("ZCR   :", zcr)
+    print("RMS   :", rms)
+    print("MFCC  :", mfcc.tolist())
+
+    # OUTPUT  FITUR AUDIO
+    print("\nHASIL KATEGORISASI EMOSI")
+    print("Emosi terdeteksi :", pred_emotion)
+
+    # SIMPAN HASIL ANALISIS
+    feature_rows_user.append({
+        "file": item["file"],
+        "pitch": pitch,
+        "zcr": zcr,
+        "rms": rms,
+        "mfcc": mfcc.tolist(),
+        "predicted_emotion": pred_emotion
+    })
+
+!zip -r processed_audio.zip /content/rekaman_sendiri/recording
+
+from google.colab import files
+files.download("processed_audio.zip")
+
+# Denoising baru
+
+# BANDPASS FILTERING
+def bandpass_filter(y, sr, low=50, high=4000, order=5):
+    nyq = sr / 2
+    b, a = signal.butter(order, [low/nyq, high/nyq], btype='band')
+    return signal.filtfilt(b, a, y)  # Filtering dua arah (tanpa phase shift)
+
+# DC REMOVAL (MENGHILANGKAN OFFSET DC PADA SINYAL)
+def remove_dc(y):
+    return y - np.mean(y)
+
+# PRE-EMPHASIS FILTER (Menekankan frekuensi tinggi dan Membantu analisis pitch & MFCC)
+def pre_emphasis(y, coef=0.97):
+    return np.append(y[0], y[1:] - coef * y[:-1])
+
+# PEAK NORMALIZATION (Menyamakan level amplitudo audio)
+def peak_normalize(y, target=0.99):
+    peak = np.max(np.abs(y)) + 1e-9 # Amplitudo maksimum
+    return y * (target / peak)
+
+def denoise_audio_safe(y, sr):
+    y = remove_dc(y)                      # Hapus DC offset
+    y = bandpass_filter(y, sr)            # Bandpass 50–4000 Hz
+    y = pre_emphasis(y, coef=0.97)        # Perkuat frekuensi tinggi
+
+    y = nr.reduce_noise(                  # Spectral gating
+        y=y,
+        sr=sr,
+        prop_decrease=0.58,
+        stationary=False
+    )
+
+    y = peak_normalize(y) # Normalisasi amplitudo
+    return y
+
+# VAD (VOICE ACTIVITY DETECTION)
+# Menghapus bagian diam (silence)
+def vad_trim(y, sr, top_db=25):
+    intervals = librosa.effects.split(y, top_db=top_db)
+    if len(intervals) == 0:
+        return y
+    return np.concatenate([y[s:e] for s, e in intervals])
+
+
+processed_dir = "/content/ravdess_selected"
+os.makedirs(processed_dir, exist_ok=True)
+feature_rows = []
+
+for item in audio_files:
+
+    print("\n" + "="*70)
+    print("ACTOR  :", item["actor"])
+    print("EMOSI  :", item["emotion"])
+    print("FILE   :", item["file"])
+    print("="*70)
+
+    # LOAD AUDIO
+    y_raw, sr = librosa.load(item["path"], sr=16000)
+
+    # PREPROCESSING (DSP)
+    y_clean = denoise_audio_safe(y_raw, sr)
+    y_clean = vad_trim(y_clean, sr)
+
+    # SAVE CLEAN AUDIO
+    save_path = os.path.join(processed_dir, item["file"])
+    sf.write(save_path, y_clean, sr)
+
+    # AUDIO OUTPUT
+    print("\nAUDIO BEFORE")
+    display(Audio(y_raw, rate=sr))
+
+    print("\nAUDIO AFTER")
+    display(Audio(y_clean, rate=sr))
+
+    # WAVEFORM
+    plot_waveform(y_raw, sr, "Waveform BEFORE Preprocessing")
+    plot_waveform(y_clean, sr, "Waveform AFTER Preprocessing")
+
+    # SPECTROGRAM
+    plot_spectrogram(y_raw, sr, "Spectrogram BEFORE Preprocessing")
+    plot_spectrogram(y_clean, sr, "Spectrogram AFTER Preprocessing")
+
+    # FFT
+    f_raw, Y_raw = compute_fft(y_raw, sr)
+    plot_fft(f_raw, Y_raw, "FFT BEFORE Preprocessing")
+
+    f_clean, Y_clean = compute_fft(y_clean, sr)
+    plot_fft(f_clean, Y_clean, "FFT AFTER Preprocessing")
+
+    # FEATURE EXTRACTION
+    pitch = extract_pitch(y_clean, sr)
+    zcr   = extract_zcr(y_clean)
+    rms   = extract_rms(y_clean)
+    mfcc  = extract_mfcc(y_clean, sr)
+
+    print("\nFITUR AUDIO")
+    print("Pitch :", pitch)
+    print("ZCR   :", zcr)
+    print("RMS   :", rms)
+    print("MFCC  :", mfcc.tolist())
+
+    feature_rows.append({
+        "actor": item["actor"],
+        "file": item["file"],
+        "emotion": item["emotion"],
+        "pitch": pitch,
+        "zcr": zcr,
+        "rms": rms,
+        "mfcc": mfcc.tolist()
+    })
+
+# Mengambil file rekaman user
+USER_RECORD_DIR = "/content/rekaman_sendiri/recording"
+
+recording_files = []
+for file in sorted(os.listdir(USER_RECORD_DIR)):
+    if file.endswith(".wav"):
+        recording_files.append({
+            "file": file,
+            "path": os.path.join(USER_RECORD_DIR, file)
+        })
+
+print("Jumlah rekaman user:", len(recording_files))
+
+processed_dir = "/content/rekaman_sendiri/recording"
+
+os.makedirs(processed_dir, exist_ok=True)
+feature_rows_user = []
+
+for item in recording_files:
+
+    print("\n" + "="*70)
+    print("REKAMAN USER :", item["file"])
+    print("="*70)
+
+    # LOAD AUDIO
+    y_raw, sr = librosa.load(item["path"], sr=16000)
+
+    # PREPROCESSING (DSP)
+    y_clean = denoise_audio_safe(y_raw, sr)
+    y_clean = vad_trim(y_clean, sr)
+
+    # SAVE CLEAN AUDIO
+    save_path = os.path.join(processed_dir, item["file"])
+    sf.write(save_path, y_clean, sr)
+
+    # AUDIO OUTPUT
+    print("\nAUDIO BEFORE")
+    display(Audio(y_raw, rate=sr))
+
+    print("\nAUDIO AFTER")
+    display(Audio(y_clean, rate=sr))
+
+    # WAVEFORM
+    plot_waveform(y_raw, sr, "Waveform BEFORE Preprocessing")
+    plot_waveform(y_clean, sr, "Waveform AFTER Preprocessing")
+
+    # SPECTROGRAM
+    plot_spectrogram(y_raw, sr, "Spectrogram BEFORE Preprocessing")
+    plot_spectrogram(y_clean, sr, "Spectrogram AFTER Preprocessing")
+
+    # FFT
+    f_raw, Y_raw = compute_fft(y_raw, sr)
+    plot_fft(f_raw, Y_raw, "FFT BEFORE Preprocessing")
+
+    f_clean, Y_clean = compute_fft(y_clean, sr)
+    plot_fft(f_clean, Y_clean, "FFT AFTER Preprocessing")
+
+    # FEATURE EXTRACTION
+    pitch = extract_pitch(y_clean, sr)
+    zcr   = extract_zcr(y_clean)
+    rms   = extract_rms(y_clean)
+    mfcc  = extract_mfcc(y_clean, sr)
+
+    # EMOTION PREDICTION
+    pred_emotion = predict_emotion_rule(pitch, zcr, rms, mfcc)
+
+    print("\nFITUR AUDIO (REKAMAN USER)")
+    print("Pitch :", pitch)
+    print("ZCR   :", zcr)
+    print("RMS   :", rms)
+    print("MFCC  :", mfcc.tolist())
+
+    print("\nHASIL KATEGORISASI EMOSI")
+    print("Emosi terdeteksi :", pred_emotion)
+
+    feature_rows_user.append({
+        "file": item["file"],
+        "pitch": pitch,
+        "zcr": zcr,
+        "rms": rms,
+        "mfcc": mfcc.tolist(),
+        "predicted_emotion": pred_emotion
+    })
